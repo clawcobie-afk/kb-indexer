@@ -85,5 +85,51 @@ def check(qdrant_url, openai_api_key):
         sys.exit(1)
 
 
+@cli.command("setup")
+@click.option("--openai-api-key", prompt="OpenAI API key", hide_input=True, help="OpenAI API key")
+@click.option("--qdrant-url", default="http://localhost:6333", prompt="Qdrant URL", show_default=True)
+def setup_cmd(openai_api_key, qdrant_url):
+    """Interactive wizard to configure kb-indexer credentials."""
+    # 1. Validate OpenAI key
+    try:
+        openai.OpenAI(api_key=openai_api_key).models.list()
+    except Exception as e:
+        click.echo(f"Error: OpenAI API key is invalid: {e}")
+        sys.exit(1)
+
+    # 2. Validate Qdrant
+    try:
+        QdrantClient(url=qdrant_url).get_collections()
+    except Exception as e:
+        click.echo(f"Error: Qdrant is not reachable: {e}")
+        sys.exit(1)
+
+    # 3. Write to ~/.config/knowledge-vault/.env (merge with existing content)
+    config_dir = os.path.expanduser("~/.config/knowledge-vault")
+    os.makedirs(config_dir, exist_ok=True)
+    env_path = os.path.join(config_dir, ".env")
+
+    # Read existing key=value lines
+    existing = {}
+    if os.path.exists(env_path):
+        with open(env_path) as f:
+            for line in f:
+                line = line.rstrip("\n")
+                if "=" in line and not line.startswith("#"):
+                    k, _, v = line.partition("=")
+                    existing[k] = v
+
+    # Update keys
+    existing["OPENAI_API_KEY"] = openai_api_key
+    existing["QDRANT_URL"] = qdrant_url
+
+    # Write back
+    with open(env_path, "w") as f:
+        for k, v in existing.items():
+            f.write(f"{k}={v}\n")
+
+    click.echo("Setup complete. Config written to ~/.config/knowledge-vault/.env")
+
+
 if __name__ == "__main__":
     cli()
