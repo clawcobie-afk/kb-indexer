@@ -4,17 +4,25 @@ import uuid
 
 from openai import OpenAI
 from qdrant_client import QdrantClient
+from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 
 def get_collection(client: QdrantClient, name: str) -> None:
     """Create Qdrant collection if it doesn't exist (1536 dim, cosine)."""
-    existing = {c.name for c in client.get_collections().collections}
-    if name not in existing:
+    try:
         client.create_collection(
             collection_name=name,
             vectors_config=VectorParams(size=1536, distance=Distance.COSINE),
         )
+    except (UnexpectedResponse, ValueError) as e:
+        already_exists = (
+            isinstance(e, ValueError) and "already exists" in str(e)
+        ) or (
+            isinstance(e, UnexpectedResponse) and e.status_code == 409
+        )
+        if not already_exists:
+            raise
 
 
 def get_embedding(text: str, openai_client: OpenAI) -> list[float]:
@@ -29,11 +37,17 @@ def get_embedding(text: str, openai_client: OpenAI) -> list[float]:
 def index_chunks(chunks_path, qdrant_client: QdrantClient, openai_client: OpenAI, collection: str) -> int:
     """Index one chunks.json file into Qdrant. Returns number of chunks indexed."""
     chunks_path = Path(chunks_path)
-    chunks = json.loads(chunks_path.read_text())
+    try:
+        chunks = json.loads(chunks_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return 0
 
     points = []
     for chunk in chunks:
-        embedding = get_embedding(chunk["text"], openai_client)
+        try:
+            embedding = get_embedding(chunk["text"], openai_client)
+        except Exception:
+            continue
         payload = {
             "video_id": chunk["video_id"],
             "title": chunk["title"],
@@ -48,7 +62,7 @@ def index_chunks(chunks_path, qdrant_client: QdrantClient, openai_client: OpenAI
             "text": chunk["text"],
         }
         point = PointStruct(
-            id=str(uuid.uuid4()),
+            id=str(uuid.uuid5(uuid.NAMESPACE_URL, f"{chunk['video_id']}_{chunk['chunk_index']}")),
             vector=embedding,
             payload=payload,
         )

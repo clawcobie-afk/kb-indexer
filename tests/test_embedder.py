@@ -3,6 +3,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
+from qdrant_client.http.exceptions import UnexpectedResponse
 from kb.embedder import get_collection, get_embedding, index_chunks, index_channel
 
 
@@ -52,7 +53,6 @@ def make_openai_mock(embedding=None):
 
 def make_qdrant_mock():
     mock = MagicMock()
-    mock.get_collections.return_value = MagicMock(collections=[])
     return mock
 
 
@@ -61,19 +61,42 @@ def make_qdrant_mock():
 class TestGetCollection:
     def test_creates_collection_when_missing(self):
         client = make_qdrant_mock()
-        client.get_collections.return_value = MagicMock(collections=[])
         get_collection(client, "kb")
         client.create_collection.assert_called_once()
         args = client.create_collection.call_args
         assert args.kwargs["collection_name"] == "kb" or args.args[0] == "kb"
 
-    def test_skips_creation_when_exists(self):
+    def test_skips_creation_when_exists_value_error(self):
         client = make_qdrant_mock()
-        existing = MagicMock()
-        existing.name = "kb"
-        client.get_collections.return_value = MagicMock(collections=[existing])
+        client.create_collection.side_effect = ValueError("Collection kb already exists")
+        # Should not raise
         get_collection(client, "kb")
-        client.create_collection.assert_not_called()
+        client.create_collection.assert_called_once()
+
+    def test_skips_creation_when_exists_unexpected_response(self):
+        client = make_qdrant_mock()
+        mock_headers = MagicMock()
+        client.create_collection.side_effect = UnexpectedResponse(
+            status_code=409,
+            reason_phrase="Conflict",
+            content=b"already exists",
+            headers=mock_headers,
+        )
+        # Should not raise
+        get_collection(client, "kb")
+        client.create_collection.assert_called_once()
+
+    def test_reraises_unexpected_non_conflict_error(self):
+        client = make_qdrant_mock()
+        mock_headers = MagicMock()
+        client.create_collection.side_effect = UnexpectedResponse(
+            status_code=500,
+            reason_phrase="Internal Server Error",
+            content=b"server error",
+            headers=mock_headers,
+        )
+        with pytest.raises(UnexpectedResponse):
+            get_collection(client, "kb")
 
     def test_creates_with_1536_dimensions(self):
         client = make_qdrant_mock()
@@ -193,6 +216,88 @@ class TestIndexChunks:
         count = index_chunks(chunks_path, qdrant, openai_client, "kb")
         assert count == 2
 
+    def test_returns_zero_on_file_not_found(self, tmp_path):
+        missing_path = tmp_path / "nonexistent.json"
+        qdrant = make_qdrant_mock()
+        openai_client = make_openai_mock()
+
+        count = index_chunks(missing_path, qdrant, openai_client, "kb")
+        assert count == 0
+        qdrant.upsert.assert_not_called()
+
+    def test_returns_zero_on_invalid_json(self, tmp_path):
+        chunks_path = tmp_path / "chunks.json"
+        chunks_path.write_text("not valid json {{{")
+        qdrant = make_qdrant_mock()
+        openai_client = make_openai_mock()
+
+        count = index_chunks(chunks_path, qdrant, openai_client, "kb")
+        assert count == 0
+        qdrant.upsert.assert_not_called()
+
+    def test_skips_chunk_on_embedding_error(self, tmp_path):
+        chunks_path = tmp_path / "chunks.json"
+        chunks_path.write_text(json.dumps(SAMPLE_CHUNKS))
+
+        qdrant = make_qdrant_mock()
+        openai_client = make_openai_mock()
+        # Make every embedding call fail
+        openai_client.embeddings.create.side_effect = Exception("API error")
+
+        count = index_chunks(chunks_path, qdrant, openai_client, "kb")
+        assert count == 0
+        qdrant.upsert.assert_not_called()
+
+    def test_skips_only_failing_chunk_on_embedding_error(self, tmp_path):
+        chunks_path = tmp_path / "chunks.json"
+        chunks_path.write_text(json.dumps(SAMPLE_CHUNKS))
+
+        qdrant = make_qdrant_mock()
+        openai_client = make_openai_mock()
+        # Fail on first call only, succeed on second
+        openai_client.embeddings.create.side_effect = [
+            Exception("API error"),
+            MagicMock(data=[MagicMock(embedding=FAKE_EMBEDDING)]),
+        ]
+
+        count = index_chunks(chunks_path, qdrant, openai_client, "kb")
+        assert count == 1
+
+    def test_uses_deterministic_ids(self, tmp_path):
+        import uuid as _uuid
+        chunks_path = tmp_path / "chunks.json"
+        chunks_path.write_text(json.dumps(SAMPLE_CHUNKS))
+
+        qdrant = make_qdrant_mock()
+        openai_client = make_openai_mock()
+
+        index_chunks(chunks_path, qdrant, openai_client, "kb")
+
+        upsert_call = qdrant.upsert.call_args
+        points = upsert_call.kwargs.get("points") or upsert_call.args[1]
+
+        expected_id_0 = str(_uuid.uuid5(_uuid.NAMESPACE_URL, "abc123_0"))
+        expected_id_1 = str(_uuid.uuid5(_uuid.NAMESPACE_URL, "abc123_1"))
+        assert points[0].id == expected_id_0
+        assert points[1].id == expected_id_1
+
+    def test_deterministic_ids_are_stable_across_calls(self, tmp_path):
+        chunks_path = tmp_path / "chunks.json"
+        chunks_path.write_text(json.dumps(SAMPLE_CHUNKS))
+
+        qdrant1 = make_qdrant_mock()
+        qdrant2 = make_qdrant_mock()
+        openai_client = make_openai_mock()
+
+        index_chunks(chunks_path, qdrant1, openai_client, "kb")
+        index_chunks(chunks_path, qdrant2, openai_client, "kb")
+
+        points1 = qdrant1.upsert.call_args.kwargs.get("points") or qdrant1.upsert.call_args.args[1]
+        points2 = qdrant2.upsert.call_args.kwargs.get("points") or qdrant2.upsert.call_args.args[1]
+
+        assert points1[0].id == points2[0].id
+        assert points1[1].id == points2[1].id
+
 
 # ── index_channel ─────────────────────────────────────────────────────────────
 
@@ -243,7 +348,7 @@ class TestIndexChannel:
                 openai_api_key="sk-test",
             )
 
-        qdrant.get_collections.assert_called_once()
+        qdrant.create_collection.assert_called_once()
 
     def test_on_progress_events(self, tmp_path):
         data_dir = self._make_data_dir(tmp_path, "testchannel", ["vid1", "vid2"])
