@@ -1,4 +1,5 @@
 import os
+import sys
 import click
 import openai
 from qdrant_client import QdrantClient
@@ -81,6 +82,7 @@ def check(qdrant_url, openai_api_key):
         print("All checks passed.")
     else:
         print(f"{failures} check(s) failed.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
