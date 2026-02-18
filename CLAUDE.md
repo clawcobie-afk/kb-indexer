@@ -28,6 +28,10 @@ OPENAI_API_KEY=... python embed.py \
 ## Env proměnné
 - `OPENAI_API_KEY` — povinné
 
+## Context7
+
+Vždy používej Context7 MCP při dotazech na dokumentaci knihoven a API, generování kódu, nebo konfiguraci – i bez explicitní žádosti.
+
 ## Konvence
 - TDD: testy jsou mockované (OpenAI + Qdrant klienti)
 - Qdrant payload obsahuje všechna metadata z chunks.json
