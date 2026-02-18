@@ -7,6 +7,13 @@ from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+__all__ = [
+    "get_collection",
+    "get_embedding",
+    "index_chunks",
+    "index_channel",
+]
+
 
 def get_collection(client: QdrantClient, name: str) -> None:
     """Create Qdrant collection if it doesn't exist (1536 dim, cosine)."""
@@ -94,8 +101,8 @@ def index_channel(
     channel_dir = data_dir / "channels" / channel_slug
     chunks_files = sorted((channel_dir / "videos").glob("*/chunks.json")) if (channel_dir / "videos").exists() else []
 
-    qdrant_client = QdrantClient(url=qdrant_url)
-    openai_client = OpenAI(api_key=openai_api_key)
+    qdrant_client = QdrantClient(url=qdrant_url, timeout=30)
+    openai_client = OpenAI(api_key=openai_api_key, timeout=30)
 
     get_collection(qdrant_client, collection)
 
